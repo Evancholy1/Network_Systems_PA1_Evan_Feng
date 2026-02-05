@@ -82,5 +82,7 @@ int readline(int fd, char * buf, int maxlen)
     if (numChar <= 0) return numChar;
     if(buf[i] == '\n') break; 
   }
+  buf[i+1] = '\0';  // Null-terminate the string
+  return i+1;       // Return number of characters read
 }
 

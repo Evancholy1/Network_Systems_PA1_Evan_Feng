@@ -14,13 +14,13 @@
 #define MAXBUF 4096 
 
 
-
 int parse_http_request(char * request, char *method, char *uri, char *version){
     if(sscanf(request, "%15s %255s %15s", method, uri, version) != 3){
         return -1;
     }
     return 0; 
 }
+
 
 void send_http_response(int fd, int status_code, const char *status_message,
                 const char *content_type, const char *body, size_t body_len) {
@@ -49,6 +49,7 @@ void send_http_response(int fd, int status_code, const char *status_message,
     }
 }
 
+
 void send_error_response(int fd, int status_code, const char *status_message){
     char body[MAXBUF];
     int body_len = snprintf(body, sizeof(body),
@@ -58,6 +59,7 @@ void send_error_response(int fd, int status_code, const char *status_message){
         send_http_response(fd, status_code, status_message, 
                             "text/html", body, body_len);
 }
+
 
 char *get_mime_type(char *file_path) {
     if (strstr(file_path, ".html")) return "text/html";
@@ -72,6 +74,7 @@ char *get_mime_type(char *file_path) {
     if (strstr(file_path, ".ico")) return "image/x-icon";
     return "text/plain";
 }
+
 
 //handles sending file given socket, filepath, and size of said file 
 void send_file_response(int fd, const char *file_path, off_t fileSize){
@@ -103,6 +106,7 @@ void send_file_response(int fd, const char *file_path, off_t fileSize){
     //free memory 
     free(fileContent);
 }
+
 
 //handle request function that each thread performs
 //reads HTTP request from client
@@ -207,6 +211,7 @@ void * thread(void *arg){
 
     return NULL;
 }
+
 
 int main (int argc, char **argv) {
     int listenfd, *connfd;
