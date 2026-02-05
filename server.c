@@ -8,6 +8,7 @@
 #include <sys/stat.h>
 #include <errno.h>
 #include <pthread.h>
+#include <sys/time.h>
 
 #define DOCUMENT_ROOT "./www"
 #define MAX_REQUEST_SIZE 8192 
@@ -23,7 +24,7 @@ int parse_http_request(char * request, char *method, char *uri, char *version){
 
 
 void send_http_response(int fd, int status_code, const char *status_message,
-                const char *content_type, const char *body, size_t body_len) {
+                const char *content_type, const char *body, size_t body_len, int keep_alive) {
     //create the header from params 
     char header[MAXBUF];
 
@@ -32,9 +33,9 @@ void send_http_response(int fd, int status_code, const char *status_message,
              "HTTP/1.1 %d %s\r\n"
              "Content-Type: %s\r\n"
              "Content-Length: %zu\r\n"
-             "Connection: close\r\n"
+             "Connection: %s\r\n"
              "\r\n",
-             status_code, status_message, content_type, body_len);
+             status_code, status_message, content_type, body_len, keep_alive ? "Keep-alive" : "close");
     
     if (body && body_len > 0 && header_len + body_len < MAXBUF){
         char response[MAXBUF];
@@ -50,14 +51,14 @@ void send_http_response(int fd, int status_code, const char *status_message,
 }
 
 
-void send_error_response(int fd, int status_code, const char *status_message){
+void send_error_response(int fd, int status_code, const char *status_message, int keep_alive){
     char body[MAXBUF];
     int body_len = snprintf(body, sizeof(body),
         "<html><body><h1>%d %s</h1><p>%s</p></body></html>",
         status_code, status_message, status_message);
 
         send_http_response(fd, status_code, status_message, 
-                            "text/html", body, body_len);
+                            "text/html", body, body_len, keep_alive);
 }
 
 
@@ -77,17 +78,17 @@ char *get_mime_type(char *file_path) {
 
 
 //handles sending file given socket, filepath, and size of said file 
-void send_file_response(int fd, const char *file_path, off_t fileSize){
+void send_file_response(int fd, const char *file_path, off_t fileSize, int keep_alive){
     FILE *file = fopen(file_path, "rb");
     if(!file) {
-        send_error_response(fd, 500, "Internal Server Error"); 
+        send_error_response(fd, 500, "Internal Server Error", keep_alive); 
         return;
     }
 
     char *fileContent = malloc(fileSize + 1);
     if(!fileContent){
         fclose(file);
-        send_error_response(fd, 500, "Internal Server Error");
+        send_error_response(fd, 500, "Internal Server Error", keep_alive);
         return; 
     }
      //copy requested data from file into file_content
@@ -97,11 +98,11 @@ void send_file_response(int fd, const char *file_path, off_t fileSize){
     //if didnt read the whole file try again send erro out 
     if ((long)bytesRead != fileSize) {
         free(fileContent);
-        send_error_response(fd, 500, "Internal Server Error");
+        send_error_response(fd, 500, "Internal Server Error", keep_alive);
         return;
     }
     //send contents over it over 
-    send_http_response(fd, 200, "OK", get_mime_type((char*)file_path), fileContent, fileSize);
+    send_http_response(fd, 200, "OK", get_mime_type((char*)file_path), fileContent, fileSize, keep_alive);
 
     //free memory 
     free(fileContent);
@@ -114,39 +115,48 @@ void send_file_response(int fd, const char *file_path, off_t fileSize){
 // open the requested file from ./www/ 
 //send HRRP response headers 
 //send the file contents
-void handle_request(int connfd){
+int handle_request(int connfd){
     char request[MAX_REQUEST_SIZE]; //buffer stores teh HTTP request line
     char method[16], uri[256], version[16]; //components of the request
     char filePath[512]; // ./www + uri
+    int keep_alive = 0;
+    char header[MAXBUF];
     struct stat fileStat; //file size and permissions
     
     //read and parse the request line 
     readline(connfd, request, MAX_REQUEST_SIZE);
 
-    //clear the rest of request lines from the socket
-    char trash[MAXBUF];
-    while (readline(connfd, trash, MAXBUF) > 0) {
-        if (strcmp(trash, "\r\n") == 0) {
-            break;  // Done, stop reading
+
+    //parse keep alive for persistent connections and set variable for future 
+    while(readline(connfd, header, MAXBUF) > 0){
+        if (strcmp(header, "\r\n") == 0) break;
+
+        if (strncasecmp(header, "Connection: Keep-alive", 22) == 0) {
+            keep_alive = 1;
+        }
+        
+        if (strncasecmp(header, "Connection: close", 17) == 0) {
+            keep_alive = 0;
         }
     }
 
+
     //bad request handling and get method, uri, and version
     if(parse_http_request(request, method, uri, version) < 0){
-        send_error_response(connfd, 400, "Bad Request");
-        return;
+        send_error_response(connfd, 400, "Bad Request", keep_alive);
+        return 0;
     }
 
     //if not a GET method
     if(strcmp(method, "GET") != 0){
-        send_error_response(connfd, 405, "Method Not Allowed");
-        return; 
+        send_error_response(connfd, 405, "Method Not Allowed", keep_alive);
+        return 0; 
     }
 
     //if not equal to one 1.0 or 1.1 then send error 
     if (strcmp(version, "HTTP/1.0") != 0 && strcmp(version, "HTTP/1.1") != 0) {
-        send_error_response(connfd, 505, "HTTP Version Not Supported");
-        return;
+        send_error_response(connfd, 505, "HTTP Version Not Supported", keep_alive);
+        return 0;
     }
 
     // /=root take to /index.html
@@ -180,21 +190,22 @@ void handle_request(int connfd){
      //check for file existence and correct permissions
     if(stat(filePath, &fileStat) < 0) {
         if (errno == ENOENT) {
-            send_error_response(connfd, 404, "Not Found");
+            send_error_response(connfd, 404, "Not Found", keep_alive);
         } else {
-            send_error_response(connfd, 403, "Forbidden");
+            send_error_response(connfd, 403, "Forbidden", keep_alive);
         }
-        return;
+        return 0;
     }
 
     //only serve regular files 
     if (!S_ISREG(fileStat.st_mode)) {
-        send_error_response(connfd, 403, "Forbidden");
-        return;
+        send_error_response(connfd, 403, "Forbidden", keep_alive);
+        return 0;
     }
 
 
-    send_file_response(connfd, filePath, fileStat.st_size);
+    send_file_response(connfd, filePath, fileStat.st_size, keep_alive);
+    return keep_alive; 
 }
 
 
@@ -206,9 +217,20 @@ void * thread(void *arg){
     int connfd = *((int *)arg);
     free(arg);
 
-    handle_request(connfd);
-    close(connfd);
+    //10 second timeout
+    struct timeval tv;
+    tv.tv_sec = 10;
+    tv.tv_usec = 0;
+    setsockopt(connfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
+    while (1) {
+        int keep_alive = handle_request(connfd);
+        
+        if (!keep_alive) break;  // Client said close, exit loop
+        // Otherwise loop back, wait for next request
+    }
+
+    close(connfd);
     return NULL;
 }
 
